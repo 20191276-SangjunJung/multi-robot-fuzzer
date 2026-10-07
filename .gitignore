@@ -1,0 +1,21 @@
+# ROS 2 build outputs
+workspace/build/
+workspace/install/
+workspace/log/
+
+# Runtime logs and results
+workspace/logs/
+workspace/fuzzing_results.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor files
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*~
