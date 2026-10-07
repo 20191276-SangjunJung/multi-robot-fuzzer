@@ -122,7 +122,4 @@ class AvoidObstacle(Node):
             msg.angular.z = self.turn_speed
         else:
             msg.angular.z = -self.turn_speed
-cd /home/sjjung/project
-git init
-git branch -m main
         return msg
