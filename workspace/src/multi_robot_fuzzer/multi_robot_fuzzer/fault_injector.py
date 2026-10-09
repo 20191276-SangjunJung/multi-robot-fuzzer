@@ -13,6 +13,7 @@ class NetworkFaultInjector(Node):
         self,
         robot_name="tb0_1",
         delay_ms=300,
+        input_topic=None,
     ):
         super().__init__("network_fault_injector")
 
@@ -23,7 +24,7 @@ class NetworkFaultInjector(Node):
 
         self.subscription = self.create_subscription(
             Twist,
-            f"/{robot_name}/cmd_vel_raw",
+            input_topic or f"/{robot_name}/cmd_vel_raw",
             self.cmd_callback,
             10,
         )

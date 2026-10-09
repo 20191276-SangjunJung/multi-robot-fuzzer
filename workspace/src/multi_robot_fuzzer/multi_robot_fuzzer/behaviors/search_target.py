@@ -1,3 +1,4 @@
+from rclpy.executors import SingleThreadedExecutor
 import math
 import time
 
@@ -19,6 +20,7 @@ class SearchTarget(Node):
     ):
         super().__init__("search_target_node")
 
+        self._local_executor = SingleThreadedExecutor(context=self.context)
         self.robot_name = robot_name
 
         self.target_x = target_x
@@ -77,7 +79,7 @@ class SearchTarget(Node):
             f"{self.detection_range:.2f} m"
         )
 
-        while rclpy.ok():
+        while rclpy.ok() and not getattr(self, "stop_requested", False):
 
             if time.time() - start_time >= self.timeout:
                 self.get_logger().warn(
@@ -86,8 +88,7 @@ class SearchTarget(Node):
 
                 return False
 
-            rclpy.spin_once(
-                self,
+            rclpy.spin_once(self, executor=self._local_executor,
                 timeout_sec=0.05,
             )
 

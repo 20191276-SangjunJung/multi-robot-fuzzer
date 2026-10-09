@@ -1,3 +1,4 @@
+from rclpy.executors import SingleThreadedExecutor
 import math
 import time
 
@@ -19,6 +20,7 @@ class ExploreArea(Node):
     ):
         super().__init__("explore_area_node")
 
+        self._local_executor = SingleThreadedExecutor(context=self.context)
         self.robot_name = robot_name
         self.waypoints = waypoints
         self.tolerance = tolerance
@@ -76,14 +78,13 @@ class ExploreArea(Node):
         self.cmd_pub.publish(msg)
 
     def move_to_waypoint(self, goal_x, goal_y, deadline):
-        while rclpy.ok():
+        while rclpy.ok() and not getattr(self, "stop_requested", False):
 
             if time.time() >= deadline:
                 self.stop_robot()
                 return False
 
-            rclpy.spin_once(
-                self,
+            rclpy.spin_once(self, executor=self._local_executor,
                 timeout_sec=0.05,
             )
 
@@ -147,6 +148,9 @@ class ExploreArea(Node):
         for index, waypoint in enumerate(
             self.waypoints
         ):
+            if getattr(self, "stop_requested", False):
+                self.stop_robot()
+                return False
             goal_x = waypoint["x"]
             goal_y = waypoint["y"]
 

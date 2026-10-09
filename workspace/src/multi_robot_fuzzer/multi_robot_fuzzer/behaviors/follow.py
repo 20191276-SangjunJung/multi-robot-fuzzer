@@ -1,3 +1,4 @@
+from rclpy.executors import SingleThreadedExecutor
 import math
 import time
 
@@ -20,6 +21,7 @@ class Follow(Node):
     ):
         super().__init__("follow_node")
 
+        self._local_executor = SingleThreadedExecutor(context=self.context)
         self.leader_name = leader_name
         self.follower_name = follower_name
         self.follow_distance = follow_distance
@@ -116,9 +118,9 @@ class Follow(Node):
 
         start_time = time.time()
 
-        while rclpy.ok():
+        while rclpy.ok() and not getattr(self, "stop_requested", False):
 
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, executor=self._local_executor, timeout_sec=0.05)
 
             if (
                 self.leader_position is None

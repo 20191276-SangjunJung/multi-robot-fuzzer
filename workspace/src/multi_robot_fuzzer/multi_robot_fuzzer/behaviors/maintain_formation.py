@@ -1,3 +1,4 @@
+from rclpy.executors import SingleThreadedExecutor
 import math
 import time
 
@@ -17,9 +18,11 @@ class MaintainFormation(Node):
         spacing=0.8,
         tolerance=0.15,
         timeout=15.0,
+        continuous=False,
     ):
         super().__init__("maintain_formation_node")
 
+        self._local_executor = SingleThreadedExecutor(context=self.context)
         if follower_names is None:
             follower_names = ["tb0_1", "tb0_2"]
 
@@ -28,6 +31,7 @@ class MaintainFormation(Node):
         self.spacing = spacing
         self.tolerance = tolerance
         self.timeout = timeout
+        self.continuous = continuous
 
         self.leader_position = None
         self.leader_yaw = None
@@ -288,10 +292,9 @@ class MaintainFormation(Node):
 
         start_time = time.time()
 
-        while rclpy.ok():
+        while rclpy.ok() and not getattr(self, "stop_requested", False):
 
-            rclpy.spin_once(
-                self,
+            rclpy.spin_once(self, executor=self._local_executor,
                 timeout_sec=0.05,
             )
 
@@ -302,7 +305,7 @@ class MaintainFormation(Node):
             # odom이 아직 전부 들어오지 않은 경우
             if not self.all_odom_received():
 
-                if elapsed_time > self.timeout:
+                if elapsed_time > self.timeout and not self.continuous:
                     self.stop_all_robots()
 
                     return (
@@ -329,7 +332,7 @@ class MaintainFormation(Node):
                     )
 
             # 현재 formation이 만들어졌으면 성공
-            if max_error <= self.tolerance:
+            if max_error <= self.tolerance and not self.continuous:
 
                 self.stop_all_robots()
 

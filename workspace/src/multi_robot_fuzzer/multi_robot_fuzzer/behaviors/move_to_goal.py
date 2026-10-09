@@ -1,3 +1,4 @@
+from rclpy.executors import SingleThreadedExecutor
 import math
 import time
 
@@ -20,6 +21,7 @@ class MoveToGoal(Node):
     ):
         super().__init__("move_to_goal_node")
 
+        self._local_executor = SingleThreadedExecutor(context=self.context)
         self.robot_name = robot_name
         self.goal_x = goal_x
         self.goal_y = goal_y
@@ -97,9 +99,9 @@ class MoveToGoal(Node):
 
         start_time = time.time()
 
-        while rclpy.ok():
+        while rclpy.ok() and not getattr(self, "stop_requested", False):
 
-            rclpy.spin_once(self, timeout_sec=0.05)
+            rclpy.spin_once(self, executor=self._local_executor, timeout_sec=0.05)
 
             if self.position is None or self.yaw is None:
                 if time.time() - start_time > self.timeout:
