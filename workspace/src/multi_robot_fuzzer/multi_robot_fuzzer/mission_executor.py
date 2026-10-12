@@ -412,6 +412,24 @@ class MissionExecutor:
                     if error > formation.tolerance:
                         return None, None
 
+        # Wait until the follower reaches the required distance.
+        if name == "leader_follower":
+            for key in support:
+                follower = self.nodes[key]
+
+                distance = follower.distance_to_leader()
+
+                if distance is None:
+                    return None, None
+
+                limit = (
+                    follower.follow_distance
+                    + follower.tolerance
+                )
+
+                if distance > limit:
+                    return None, None
+
         # Stop support behaviors after primary success.
         for key in support:
             self.nodes[key].stop_requested = True
