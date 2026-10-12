@@ -17,7 +17,7 @@ class MoveToGoal(Node):
         goal_x=1.0,
         goal_y=0.0,
         tolerance=0.1,
-        timeout=15.0,
+        timeout=60.0,
     ):
         super().__init__("move_to_goal_node")
 

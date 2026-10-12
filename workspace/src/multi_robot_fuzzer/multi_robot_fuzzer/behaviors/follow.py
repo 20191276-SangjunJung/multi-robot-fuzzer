@@ -1,10 +1,8 @@
 from rclpy.executors import SingleThreadedExecutor
 import math
 import time
-
 import rclpy
 from rclpy.node import Node
-
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 
@@ -20,31 +18,27 @@ class Follow(Node):
         timeout=15.0,
     ):
         super().__init__("follow_node")
-
         self._local_executor = SingleThreadedExecutor(context=self.context)
         self.leader_name = leader_name
         self.follower_name = follower_name
         self.follow_distance = follow_distance
         self.tolerance = tolerance
         self.timeout = timeout
-
+        self.stop_requested = False
         self.leader_position = None
         self.follower_position = None
         self.follower_yaw = None
-
         self.cmd_pub = self.create_publisher(
             Twist,
             f"/{follower_name}/cmd_vel_raw",
             10,
         )
-
         self.leader_odom_sub = self.create_subscription(
             Odometry,
             f"/{leader_name}/odom",
             self.leader_odom_callback,
             10,
         )
-
         self.follower_odom_sub = self.create_subscription(
             Odometry,
             f"/{follower_name}/odom",
@@ -63,19 +57,15 @@ class Follow(Node):
             msg.pose.pose.position.x,
             msg.pose.pose.position.y,
         )
-
         q = msg.pose.pose.orientation
-
         siny_cosp = 2.0 * (
             q.w * q.z
             + q.x * q.y
         )
-
         cosy_cosp = 1.0 - 2.0 * (
             q.y * q.y
             + q.z * q.z
         )
-
         self.follower_yaw = math.atan2(
             siny_cosp,
             cosy_cosp,
@@ -90,7 +80,6 @@ class Follow(Node):
 
         leader_x, leader_y = self.leader_position
         follower_x, follower_y = self.follower_position
-
         return math.sqrt(
             (leader_x - follower_x) ** 2
             + (leader_y - follower_y) ** 2
@@ -106,8 +95,7 @@ class Follow(Node):
         return angle
 
     def stop_robot(self):
-        msg = Twist()
-        self.cmd_pub.publish(msg)
+        self.cmd_pub.publish(Twist())
 
     def execute(self):
         print(
@@ -115,43 +103,50 @@ class Follow(Node):
             f"follower={self.follower_name}, "
             f"distance={self.follow_distance}"
         )
-
-        start_time = time.time()
-
-        while rclpy.ok() and not getattr(self, "stop_requested", False):
-
-            rclpy.spin_once(self, executor=self._local_executor, timeout_sec=0.05)
+        start_time = time.monotonic()
+        # Wait for the first odometry messages.
+        while rclpy.ok() and not self.stop_requested:
+            rclpy.spin_once(
+                self,
+                executor=self._local_executor,
+                timeout_sec=0.05,
+            )
 
             if (
-                self.leader_position is None
-                or self.follower_position is None
-                or self.follower_yaw is None
+                self.leader_position is not None
+                and self.follower_position is not None
+                and self.follower_yaw is not None
             ):
-                if time.time() - start_time > self.timeout:
-                    self.stop_robot()
-                    return False, None, time.time() - start_time
+                break
 
-                continue
-
+            if time.monotonic() - start_time > self.timeout:
+                self.stop_robot()
+                print("Follow failed: odometry timeout")
+                return False, None, time.monotonic() - start_time
+        # Follow until the mission requests a stop.
+        while rclpy.ok() and not self.stop_requested:
+            rclpy.spin_once(
+                self,
+                executor=self._local_executor,
+                timeout_sec=0.05,
+            )
             distance = self.distance_to_leader()
 
-            # 원하는 거리보다 충분히 가까우면 정지
+            if distance is None:
+                continue
+
             if distance <= self.follow_distance + self.tolerance:
                 self.stop_robot()
-
             else:
                 leader_x, leader_y = self.leader_position
                 follower_x, follower_y = self.follower_position
-
                 target_angle = math.atan2(
                     leader_y - follower_y,
                     leader_x - follower_x,
                 )
-
                 angle_error = self.normalize_angle(
                     target_angle - self.follower_yaw
                 )
-
                 msg = Twist()
 
                 if abs(angle_error) > 0.1:
@@ -163,26 +158,19 @@ class Follow(Node):
 
                 self.cmd_pub.publish(msg)
 
-            if time.time() - start_time > self.timeout:
-                self.stop_robot()
-
-                final_distance = self.distance_to_leader()
-
-                print(
-                    f"Follow finished: "
-                    f"distance={final_distance:.3f} m"
-                )
-
-                success = (
-                    final_distance
-                    <= self.follow_distance + self.tolerance
-                )
-
-                return (
-                    success,
-                    final_distance,
-                    time.time() - start_time,
-                )
-
         self.stop_robot()
-        return False, None, time.time() - start_time
+        elapsed = time.monotonic() - start_time
+        final_distance = self.distance_to_leader()
+
+        if final_distance is None:
+            print("Follow finished: missing odometry")
+            return False, None, elapsed
+
+        success = (
+            final_distance <= self.follow_distance + self.tolerance
+        )
+        print(
+            f"Follow finished: distance={final_distance:.3f} m, "
+            f"success={success}"
+        )
+        return success, final_distance, elapsed

@@ -1,7 +1,5 @@
-
 import threading
 import time
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -12,7 +10,6 @@ from .behaviors.maintain_formation import MaintainFormation
 from .behaviors.avoid_obstacle import AvoidObstacle
 from .behaviors.explore_area import ExploreArea
 from .behaviors.search_target import SearchTarget
-
 from .missions import (
     navigation,
     leader_follower,
@@ -22,7 +19,6 @@ from .missions import (
     search,
     rendezvous,
 )
-
 
 MISSIONS = {
     mission.MISSION_NAME: mission
@@ -56,31 +52,26 @@ class AvoidanceMux(Node):
         turn_speed=0.6,
     ):
         super().__init__(f"avoidance_mux_{robot_name}")
-
         self.robot_name = robot_name
         self.avoid = AvoidObstacle(
             robot_name=robot_name,
             safe_distance=safe_distance,
             turn_speed=turn_speed,
         )
-
         self.latest_command = Twist()
         self.last_command_time = 0.0
         self.enabled = True
-
         self.raw_sub = self.create_subscription(
             Twist,
             f"/{robot_name}/cmd_vel_raw",
             self.raw_callback,
             10,
         )
-
         self.safe_pub = self.create_publisher(
             Twist,
             f"/{robot_name}/cmd_vel_safe",
             10,
         )
-
         self.timer = self.create_timer(
             0.05,
             self.publish_command,
@@ -94,7 +85,6 @@ class AvoidanceMux(Node):
         if not self.enabled:
             self.safe_pub.publish(Twist())
             return
-
         # Do not continue an old movement command.
         if (
             time.monotonic() - self.last_command_time
@@ -130,18 +120,14 @@ class MissionExecutor:
     def __init__(self, mission_spec, timeout=120.0):
         self.spec = mission_spec
         self.timeout = timeout
-
         self.nodes = {}
         self.threads = {}
         self.results = {}
         self.muxes = {}
-
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
-
         self.state = "PENDING"
         self.termination_reason = None
-
         self._validate()
 
     def _validate(self):
@@ -162,7 +148,6 @@ class MissionExecutor:
         required = set(
             MISSIONS[name].SUPPORTED_BEHAVIORS
         )
-
         present = {
             behavior["type"]
             for behavior in behaviors
@@ -228,24 +213,19 @@ class MissionExecutor:
                     "robot_name",
                     spec["robot"],
                 )
-
             elif kind == "follow":
                 kwargs.setdefault(
                     "follower_name",
                     spec["robot"],
                 )
-
             elif kind == "maintain_formation":
                 kwargs["continuous"] = True
 
             behavior = BEHAVIOR_CLASSES[kind](
                 **kwargs
             )
-
             behavior_id = f"{kind}_{index}"
-
             self.nodes[behavior_id] = behavior
-
             self.results[behavior_id] = {
                 "status": "PENDING",
                 "success": None,
@@ -296,7 +276,6 @@ class MissionExecutor:
                     "metric": metric,
                     "execution_time": elapsed,
                 })
-
         except Exception as exc:
             with self.lock:
                 self.results[behavior_id].update({
@@ -307,8 +286,8 @@ class MissionExecutor:
 
     def _spin_muxes(self):
         from rclpy.executors import SingleThreadedExecutor
-
         executors = []
+
         try:
             for mux in self.muxes.values():
                 for node in (mux, mux.avoid):
@@ -356,17 +335,14 @@ class MissionExecutor:
     def _evaluate_execution(self):
         name = self.spec["name"]
         results = self._snapshot()
-
         primary = self._primary_ids()
         support = self._support_ids()
-
         # A behavior exception is an execution error.
         if any(
             result["status"] == "ERROR"
             for result in results.values()
         ):
             return "ERROR", "behavior_error"
-
         # Search: detecting the target completes the mission.
         if name == "search":
             for key, result in results.items():
@@ -390,28 +366,33 @@ class MissionExecutor:
                 return "FAILED", "target_not_found"
 
             return None, None
-
         # A failed primary behavior ends the mission.
         if any(
             results[key]["success"] is False
             for key in primary
         ):
             return "FAILED", "movement_failed"
-
         # A support behavior failing before mission end.
         if any(
             results[key]["success"] is False
             for key in support
         ):
             return "FAILED", "support_failed"
-
         # Wait until every primary movement finishes.
         if not all(
             results[key]["success"] is True
             for key in primary
         ):
             return None, None
-
+        # Stop support behaviors after primary success.
+        for key in support:
+            self.nodes[key].stop_requested = True
+        # Wait for final support results.
+        if not all(
+            results[key]["status"] != "PENDING"
+            for key in support
+        ):
+            return None, None
         # Leader-Follower: inspect final tracking distance.
         if name == "leader_follower":
             followers = [
@@ -436,7 +417,6 @@ class MissionExecutor:
 
                 if distance > limit:
                     return "FAILED", "follow_distance_exceeded"
-
         # Formation: inspect the final formation error.
         if name in (
             "formation_navigation",
@@ -470,7 +450,6 @@ class MissionExecutor:
 
                     if error > formation.tolerance:
                         return "FAILED", "formation_error"
-
         # Rendezvous: all MoveToGoal nodes must succeed.
         # This is already enforced by checking every primary.
         return "COMPLETED", "primary_behaviors_completed"
@@ -534,7 +513,6 @@ class MissionExecutor:
 
         start_time = time.monotonic()
         deadline = start_time + self.timeout
-
         self.state = "RUNNING"
         mux_thread = None
 
@@ -557,7 +535,6 @@ class MissionExecutor:
                     args=(key, behavior),
                     daemon=True,
                 )
-
                 self.threads[key] = thread
                 thread.start()
 
@@ -585,11 +562,9 @@ class MissionExecutor:
                 self.termination_reason = (
                     "ros_shutdown"
                 )
-
         except Exception as exc:
             self.state = "ERROR"
             self.termination_reason = repr(exc)
-
         finally:
             self._cleanup(mux_thread)
 
