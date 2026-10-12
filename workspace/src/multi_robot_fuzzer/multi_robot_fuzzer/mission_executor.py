@@ -384,9 +384,38 @@ class MissionExecutor:
             for key in primary
         ):
             return None, None
+
+        # Wait until the final formation is completed.
+        if name in (
+            "formation_navigation",
+            "formation_obstacle_avoidance",
+        ):
+            for key in support:
+                formation = self.nodes[key]
+
+                if not formation.all_odom_received():
+                    return None, None
+
+                for follower_name in formation.follower_names:
+                    target = formation.get_target_position(
+                        follower_name
+                    )
+
+                    if target is None:
+                        return None, None
+
+                    error = formation.distance_to_target(
+                        follower_name,
+                        *target,
+                    )
+
+                    if error > formation.tolerance:
+                        return None, None
+
         # Stop support behaviors after primary success.
         for key in support:
             self.nodes[key].stop_requested = True
+
         # Wait for final support results.
         if not all(
             results[key]["status"] != "PENDING"
@@ -448,8 +477,15 @@ class MissionExecutor:
                         *target,
                     )
 
+                    #if error > formation.tolerance:
+                    #    return "FAILED", "formation_error"
                     if error > formation.tolerance:
-                        return "FAILED", "formation_error"
+                        print(
+                            f"Formation error: follower={follower_name}, "
+                            f"error={error:.3f} m, "
+                            f"tolerance={formation.tolerance:.3f} m"
+                        )
+                        return "FAILED", "formation_error"                       
         # Rendezvous: all MoveToGoal nodes must succeed.
         # This is already enforced by checking every primary.
         return "COMPLETED", "primary_behaviors_completed"

@@ -347,7 +347,7 @@ class MaintainFormation(Node):
                     elapsed_time,
                 )
 
-            if elapsed_time > self.timeout:
+            if elapsed_time > self.timeout and not self.continuous:
 
                 self.stop_all_robots()
 
@@ -365,7 +365,7 @@ class MaintainFormation(Node):
         self.stop_all_robots()
 
         return (
-            False,
+            True,
             None,
             time.time() - start_time,
         )
