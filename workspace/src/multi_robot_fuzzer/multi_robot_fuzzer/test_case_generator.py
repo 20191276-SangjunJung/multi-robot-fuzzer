@@ -320,6 +320,10 @@ class TestCaseGenerator:
             self.make_behavior(
                 "explore_area", "tb0_1",
                 waypoints=waypoints,
+                mode="coverage" if not search else "waypoint",
+                target_coverage=0.75,
+                timeout=90.0,
+                goal_timeout=25.0,
             ),
             self.make_behavior(
                 "avoid_obstacle", "tb0_1",
