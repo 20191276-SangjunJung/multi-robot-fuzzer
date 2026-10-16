@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
+from .bug_oracle import BugOracle
 from .behaviors.move_to_goal import MoveToGoal
 from .behaviors.follow import Follow
 from .behaviors.maintain_formation import MaintainFormation
@@ -124,6 +125,7 @@ class MissionExecutor:
         self.threads = {}
         self.results = {}
         self.muxes = {}
+        self.oracle = BugOracle()
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.state = "PENDING"
@@ -314,199 +316,20 @@ class MissionExecutor:
                 for key, value in self.results.items()
             }
 
-    def _primary_ids(self):
-        return [
-            key
-            for key in self.nodes
-            if key.startswith(
-                ("move_to_goal_", "explore_area_")
-            )
-        ]
-
-    def _support_ids(self):
-        return [
-            key
-            for key in self.nodes
-            if key.startswith(
-                ("follow_", "maintain_formation_")
-            )
-        ]
-
     def _evaluate_execution(self):
-        name = self.spec["name"]
         results = self._snapshot()
-        primary = self._primary_ids()
-        support = self._support_ids()
-        # A behavior exception is an execution error.
-        if any(
-            result["status"] == "ERROR"
-            for result in results.values()
-        ):
+        # Execution errors are the executor's responsibility.
+        if any(v["status"] == "ERROR" for v in results.values()):
             return "ERROR", "behavior_error"
-        # Search: detecting the target completes the mission.
-        if name == "search":
-            for key, result in results.items():
-                if (
-                    key.startswith("search_target_")
-                    and result["success"] is True
-                ):
-                    return "COMPLETED", "target_found"
 
-            if any(
-                key in results
-                and results[key]["success"] is False
-                for key in primary
-            ):
-                return "FAILED", "exploration_failed"
-
-            if all(
-                results[key]["status"] != "PENDING"
-                for key in primary
-            ):
-                return "FAILED", "target_not_found"
-
-            return None, None
-        # A failed primary behavior ends the mission.
-        if any(
-            results[key]["success"] is False
-            for key in primary
-        ):
-            return "FAILED", "movement_failed"
-        # A support behavior failing before mission end.
-        if any(
-            results[key]["success"] is False
-            for key in support
-        ):
-            return "FAILED", "support_failed"
-        # Wait until every primary movement finishes.
-        if not all(
-            results[key]["success"] is True
-            for key in primary
-        ):
-            return None, None
-
-        # Wait until the final formation is completed.
-        if name in (
-            "formation_navigation",
-            "formation_obstacle_avoidance",
-        ):
-            for key in support:
-                formation = self.nodes[key]
-
-                if not formation.all_odom_received():
-                    return None, None
-
-                for follower_name in formation.follower_names:
-                    target = formation.get_target_position(
-                        follower_name
-                    )
-
-                    if target is None:
-                        return None, None
-
-                    error = formation.distance_to_target(
-                        follower_name,
-                        *target,
-                    )
-
-                    if error > formation.tolerance:
-                        return None, None
-
-        # Wait until the follower reaches the required distance.
-        if name == "leader_follower":
-            for key in support:
-                follower = self.nodes[key]
-
-                distance = follower.distance_to_leader()
-
-                if distance is None:
-                    return None, None
-
-                limit = (
-                    follower.follow_distance
-                    + follower.tolerance
-                )
-
-                if distance > limit:
-                    return None, None
-
-        # Stop support behaviors after primary success.
-        for key in support:
-            self.nodes[key].stop_requested = True
-
-        # Wait for final support results.
-        if not all(
-            results[key]["status"] != "PENDING"
-            for key in support
-        ):
-            return None, None
-        # Leader-Follower: inspect final tracking distance.
-        if name == "leader_follower":
-            followers = [
-                node
-                for key, node in self.nodes.items()
-                if key.startswith("follow_")
-            ]
-
-            if not followers:
-                return "ERROR", "missing_follower"
-
-            for follower in followers:
-                distance = follower.distance_to_leader()
-
-                if distance is None:
-                    return "FAILED", "missing_follower_odom"
-
-                limit = (
-                    follower.follow_distance
-                    + follower.tolerance
-                )
-
-                if distance > limit:
-                    return "FAILED", "follow_distance_exceeded"
-        # Formation: inspect the final formation error.
-        if name in (
-            "formation_navigation",
-            "formation_obstacle_avoidance",
-        ):
-            formations = [
-                node
-                for key, node in self.nodes.items()
-                if key.startswith("maintain_formation_")
-            ]
-
-            if not formations:
-                return "ERROR", "missing_formation"
-
-            for formation in formations:
-                if not formation.all_odom_received():
-                    return "FAILED", "missing_formation_odom"
-
-                for follower_name in formation.follower_names:
-                    target = formation.get_target_position(
-                        follower_name
-                    )
-
-                    if target is None:
-                        return "FAILED", "missing_formation_target"
-
-                    error = formation.distance_to_target(
-                        follower_name,
-                        *target,
-                    )
-
-                    #if error > formation.tolerance:
-                    #    return "FAILED", "formation_error"
-                    if error > formation.tolerance:
-                        print(
-                            f"Formation error: follower={follower_name}, "
-                            f"error={error:.3f} m, "
-                            f"tolerance={formation.tolerance:.3f} m"
-                        )
-                        return "FAILED", "formation_error"                       
-        # Rendezvous: all MoveToGoal nodes must succeed.
-        # This is already enforced by checking every primary.
-        return "COMPLETED", "primary_behaviors_completed"
+        status, reason, stop_support = self.oracle.assess_progress(
+            self.spec, results, self.nodes
+        )
+        if stop_support:
+            for key, node in self.nodes.items():
+                if key.startswith(("follow_", "maintain_formation_")):
+                    node.stop_requested = True
+        return status, reason
 
     def _request_stop(self):
         self.stop_event.set()

@@ -15,7 +15,6 @@ from multi_robot_fuzzer.fault_injector import NetworkFaultInjector
 from multi_robot_fuzzer.bug_oracle import BugOracle
 from multi_robot_fuzzer.test_case_generator import TestCaseGenerator
 
-
 TEST_COUNT = 3
 RESULT_FILE = "/workspace/fuzzing_results_v2.csv"
 
