@@ -146,26 +146,75 @@ class ExploreArea(Node):
         return best
 
     def _execute_waypoints(self):
-        """Preserve the original waypoint semantics for Search missions."""
+        """Visit waypoints sequentially, supporting mission-level cancellation."""
         started = time.monotonic()
-        for gx, gy in self.candidates:
-            if getattr(self, 'stop_requested', False):
-                return False, None, time.monotonic()-started
-            remaining = self.timeout-(time.monotonic()-started)
+
+        if not self.candidates:
+            self.get_logger().error("No waypoints provided.")
+            return False, None, time.monotonic() - started
+
+        for index, (gx, gy) in enumerate(self.candidates):
+            if getattr(self, "stop_requested", False):
+                return False, None, time.monotonic() - started
+
+            remaining = self.timeout - (time.monotonic() - started)
+
             if remaining <= 0:
-                return False, None, time.monotonic()-started
-            mover = MoveToGoal(robot_name=self.robot_name, goal_x=gx, goal_y=gy,
-                               tolerance=self.goal_tolerance,
-                               timeout=min(self.goal_timeout, remaining))
+                self.get_logger().warn("Waypoint exploration timed out.")
+                return False, None, time.monotonic() - started
+
+            self.get_logger().info(
+                f"Waypoint {index + 1}/{len(self.candidates)}: "
+                f"({gx:.2f}, {gy:.2f})"
+            )
+
+            mover = MoveToGoal(
+                robot_name=self.robot_name,
+                goal_x=gx,
+                goal_y=gy,
+                tolerance=self.goal_tolerance,
+                timeout=min(self.goal_timeout, remaining),
+            )
+
+            stop_watcher_done = threading.Event()
+
+            def propagate_stop(active_mover=mover):
+                while not stop_watcher_done.is_set():
+                    if getattr(self, "stop_requested", False):
+                        active_mover.stop_requested = True
+                        return
+
+                    time.sleep(0.05)
+
+            watcher = threading.Thread(
+                target=propagate_stop,
+                daemon=True,
+            )
+            watcher.start()
+
             try:
                 ok, _, _ = mover.execute()
+
             finally:
+                stop_watcher_done.set()
+                watcher.join(timeout=0.2)
+
                 mover.stop_robot()
                 mover._local_executor.shutdown()
                 mover.destroy_node()
+
+            if getattr(self, "stop_requested", False):
+                return False, None, time.monotonic() - started
+
             if not ok:
-                return False, None, time.monotonic()-started
-        return True, None, time.monotonic()-started
+                self.get_logger().warn(
+                    f"Failed to reach waypoint {index + 1}."
+                )
+                return False, None, time.monotonic() - started
+
+        self.get_logger().info("All waypoints completed.")
+
+        return True, None, time.monotonic() - started
 
     def execute(self):
         if self.mode == "waypoint":
