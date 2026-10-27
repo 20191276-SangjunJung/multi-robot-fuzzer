@@ -409,6 +409,23 @@ class TestCaseGenerator:
 
         return robots, behaviors
 
+
+    def add_imu_faults(self, test_case, fault_type="bias",
+                       accel=0.0, gyro=0.1):
+        for robot in test_case["scenario"]["robots"]:
+            test_case.setdefault("faults", []).append({
+                "domain": "sensor",
+                "sensor": "imu",
+                "type": fault_type,
+                "target": robot["name"],
+                "parameters": {
+                    "accel": accel,
+                    "gyro": gyro,
+                },
+            })
+
+        return test_case
+
     def generate(self, mission_name=None, world=None):
         if mission_name is None:
             mission_name = random.choice(MISSION_NAMES)
