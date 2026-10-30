@@ -410,17 +410,34 @@ class TestCaseGenerator:
         return robots, behaviors
 
 
-    def add_imu_faults(self, test_case, fault_type="bias",
-                       accel=0.0, gyro=0.1):
+    def add_imu_faults(
+        self,
+        test_case,
+        amplitude,
+        frequency,
+        start_time,
+    ):
+        faults = test_case.setdefault("faults", [])
+
+        # Prevent duplicate IMU faults when called again.
+        faults[:] = [
+            fault for fault in faults
+            if not (
+                fault.get("domain") == "sensor"
+                and fault.get("sensor") == "imu"
+            )
+        ]
+
         for robot in test_case["scenario"]["robots"]:
-            test_case.setdefault("faults", []).append({
+            faults.append({
                 "domain": "sensor",
                 "sensor": "imu",
-                "type": fault_type,
+                "type": "acoustic",
                 "target": robot["name"],
                 "parameters": {
-                    "accel": accel,
-                    "gyro": gyro,
+                    "amplitude": amplitude,
+                    "frequency": frequency,
+                    "start_time": start_time,
                 },
             })
 

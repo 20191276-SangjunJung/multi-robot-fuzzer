@@ -1,7 +1,6 @@
-
 import argparse
 import copy
-import random
+import math
 import time
 from collections import deque
 
@@ -24,7 +23,6 @@ class NetworkFaultInjector(Node):
 
         self.robot_name = robot_name
         self.delay_sec = delay_ms / 1000.0
-
         self.queue = deque()
 
         self.subscription = self.create_subscription(
@@ -52,7 +50,6 @@ class NetworkFaultInjector(Node):
 
     def cmd_callback(self, msg):
         release_time = time.time() + self.delay_sec
-
         self.queue.append((release_time, msg))
 
     def process_queue(self):
@@ -68,26 +65,27 @@ class IMUFaultInjector(Node):
     def __init__(
         self,
         robot_name="tb0_1",
-        fault_type="bias",
-        accel_param=0.0,
-        gyro_param=0.0,
+        amplitude=0.0,
+        frequency=0.0,
+        start_time=0.0,
     ):
-        super().__init__("imu_fault_injector")
+        super().__init__(f"imu_fault_injector_{robot_name}")
 
-        if fault_type not in ("bias", "noise", "scale"):
-            raise ValueError(f"Unknown fault type: {fault_type}")
-
-        if fault_type == "noise" and (
-            accel_param < 0 or gyro_param < 0
+        if not all(
+            math.isfinite(value) and value >= 0
+            for value in (amplitude, frequency, start_time)
         ):
             raise ValueError(
-                "Noise standard deviation must be non-negative"
+                "Acoustic parameters must be finite and non-negative"
             )
 
         self.robot_name = robot_name
-        self.fault_type = fault_type
-        self.accel_param = accel_param
-        self.gyro_param = gyro_param
+        self.amplitude = amplitude
+        self.frequency = frequency
+        self.start_time = start_time
+
+        # Time origin: first received IMU sample.
+        self.time_origin = None
 
         self.subscription = self.create_subscription(
             Imu,
@@ -103,35 +101,31 @@ class IMUFaultInjector(Node):
         )
 
         self.get_logger().info(
-            f"IMU Fault Injector started: "
+            f"Acoustic IMU Injector started: "
             f"robot={robot_name}, "
-            f"fault={fault_type}, "
-            f"accel={accel_param}, "
-            f"gyro={gyro_param}"
+            f"amplitude={amplitude} rad/s, "
+            f"frequency={frequency} Hz, "
+            f"start_time={start_time} s"
         )
-
-    def apply_fault(self, value, parameter):
-        if self.fault_type == "bias":
-            return value + parameter
-
-        if self.fault_type == "noise":
-            return value + random.gauss(0.0, parameter)
-
-        if self.fault_type == "scale":
-            return value * (1.0 + parameter)
-
-        return value
 
     def imu_callback(self, msg):
         faulty_msg = copy.deepcopy(msg)
 
-        for vector, parameter in (
-            (faulty_msg.linear_acceleration, self.accel_param),
-            (faulty_msg.angular_velocity, self.gyro_param),
-        ):
-            vector.x = self.apply_fault(vector.x, parameter)
-            vector.y = self.apply_fault(vector.y, parameter)
-            vector.z = self.apply_fault(vector.z, parameter)
+        now = time.monotonic()
+
+        if self.time_origin is None:
+            self.time_origin = now
+
+        elapsed = now - self.time_origin
+
+        if elapsed >= self.start_time:
+            attack_t = elapsed - self.start_time
+
+            error = self.amplitude * math.sin(
+                2.0 * math.pi * self.frequency * attack_t
+            )
+
+            faulty_msg.angular_velocity.z += error
 
         self.publisher.publish(faulty_msg)
 
@@ -140,13 +134,9 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--robot", default="tb0_1")
-    parser.add_argument(
-        "--fault",
-        choices=["bias", "noise", "scale"],
-        default="bias",
-    )
-    parser.add_argument("--accel", type=float, default=0.0)
-    parser.add_argument("--gyro", type=float, default=0.0)
+    parser.add_argument("--amplitude", type=float, default=0.0)
+    parser.add_argument("--frequency", type=float, default=0.0)
+    parser.add_argument("--start-time", type=float, default=0.0)
 
     args = parser.parse_args()
 
@@ -154,9 +144,9 @@ def main():
 
     node = IMUFaultInjector(
         robot_name=args.robot,
-        fault_type=args.fault,
-        accel_param=args.accel,
-        gyro_param=args.gyro,
+        amplitude=args.amplitude,
+        frequency=args.frequency,
+        start_time=args.start_time,
     )
 
     try:
