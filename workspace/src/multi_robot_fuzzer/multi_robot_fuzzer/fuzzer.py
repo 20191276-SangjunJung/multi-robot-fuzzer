@@ -192,6 +192,51 @@ def run_test(test_number, test_case, result_file):
                 yaw=spawn["yaw"],
             )
 
+        # Collect LiDAR faults.
+        lidar_faults = [
+            fault
+            for fault in faults
+            if (
+                fault.get("domain") == "sensor"
+                and fault.get("sensor") == "lidar"
+            )
+        ]
+
+        for fault in lidar_faults:
+            name = fault["target"]
+            params = fault["parameters"]
+            attack_type = fault["type"]
+
+            if attack_type not in ("ghost", "removal"):
+                raise ValueError(
+                    f"Unsupported LiDAR fault: {attack_type}"
+                )
+
+            print(
+                f"[LiDAR Attack] robot={name}, "
+                f"type={attack_type}, "
+                f"sector={params['sector']}, "
+                f"start={params['start_time']} s"
+            )
+
+            sensor_processes.append(
+                start_process([
+                    "python3",
+                    INJECTOR_SCRIPT,
+                    "--sensor", "lidar",
+                    "--robot", name,
+                    "--attack-type", attack_type,
+                    "--sector", params["sector"],
+                    "--ghost-distance",
+                    str(params["ghost_distance"]),
+                    "--start-time",
+                    str(params["start_time"]),
+                ])
+            )
+
+        if lidar_faults:
+            time.sleep(2.0)
+
         # Collect IMU faults.
         imu_faults = [
             fault
@@ -565,6 +610,30 @@ def parse_args(args=None):
         metavar=("MIN", "MAX"),
     )
 
+    parser.add_argument(
+        "--lidar-fault",
+        choices=["ghost", "removal"],
+        default=None,
+    )
+
+    parser.add_argument(
+        "--lidar-sector",
+        choices=["global", "front", "left", "right", "rear"],
+        default="front",
+    )
+
+    parser.add_argument(
+        "--lidar-ghost-distance",
+        type=float,
+        default=0.3,
+    )
+
+    parser.add_argument(
+        "--lidar-start-time",
+        type=float,
+        default=5.0,
+    )
+
     return parser.parse_args(args)
 
 
@@ -606,6 +675,14 @@ def main(args=None):
                     f"/{name}/odom:="
                     f"/{name}/odometry/filtered"
                 ),
+            ]
+
+    # Route behavior LiDAR subscriptions through faulty scans.
+    if options.lidar_fault:
+        for name in ("tb0_0", "tb0_1", "tb0_2"):
+            ros_args += [
+                "-r",
+                f"/{name}/scan:=/{name}/scan_faulty",
             ]
 
     rclpy.init(args=ros_args)
@@ -670,6 +747,16 @@ def main(args=None):
                         amplitude=amplitude,
                         frequency=frequency,
                         start_time=attack_start,
+                    )
+
+                # Add LiDAR faults.
+                if options.lidar_fault:
+                    generator.add_lidar_faults(
+                        test_case,
+                        attack_type=options.lidar_fault,
+                        sector=options.lidar_sector,
+                        ghost_distance=options.lidar_ghost_distance,
+                        start_time=options.lidar_start_time,
                     )
 
                 # Run test.

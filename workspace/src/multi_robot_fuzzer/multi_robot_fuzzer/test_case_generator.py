@@ -443,6 +443,39 @@ class TestCaseGenerator:
 
         return test_case
 
+    def add_lidar_faults(
+        self,
+        test_case,
+        attack_type,
+        sector,
+        ghost_distance,
+        start_time,
+    ):
+        faults = test_case.setdefault("faults", [])
+
+        faults[:] = [
+            fault for fault in faults
+            if not (
+                fault.get("domain") == "sensor"
+                and fault.get("sensor") == "lidar"
+            )
+        ]
+
+        for robot in test_case["scenario"]["robots"]:
+            faults.append({
+                "domain": "sensor",
+                "sensor": "lidar",
+                "type": attack_type,
+                "target": robot["name"],
+                "parameters": {
+                    "sector": sector,
+                    "ghost_distance": ghost_distance,
+                    "start_time": start_time,
+                },
+            })
+
+        return test_case
+
     def generate(self, mission_name=None, world=None):
         if mission_name is None:
             mission_name = random.choice(MISSION_NAMES)
