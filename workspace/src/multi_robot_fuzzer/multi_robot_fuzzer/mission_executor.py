@@ -382,7 +382,7 @@ class MissionExecutor:
             self.state = "ERROR"
             self.termination_reason = "mux_thread_not_stopped"
 
-    def execute(self, on_prepared=None):
+    def execute(self, on_prepared=None, on_started=None):
         if self.state != "PENDING":
             raise RuntimeError(
                 "MissionExecutor can only execute once"
@@ -392,6 +392,8 @@ class MissionExecutor:
         deadline = start_time + self.timeout
         self.state = "RUNNING"
         mux_thread = None
+        mission_start = None
+        mission_duration = None        
 
         try:
             self._prepare()
@@ -405,6 +407,11 @@ class MissionExecutor:
                     daemon=True,
                 )
                 mux_thread.start()
+
+            if on_started is not None:
+                on_started(self)
+
+            mission_start = time.monotonic()
 
             for key, behavior in self.nodes.items():
                 thread = threading.Thread(
@@ -443,6 +450,9 @@ class MissionExecutor:
             self.state = "ERROR"
             self.termination_reason = repr(exc)
         finally:
+            if mission_start is not None:
+                mission_duration = time.monotonic() - mission_start
+
             self._cleanup(mux_thread)
 
         return {
@@ -453,4 +463,5 @@ class MissionExecutor:
             "execution_time": (
                 time.monotonic() - start_time
             ),
+            "mission_duration": mission_duration,
         }

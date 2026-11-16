@@ -2,14 +2,16 @@ import argparse
 import copy
 import math
 import time
+import random
 from collections import deque
 
 import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Imu, LaserScan
+from std_msgs.msg import Float64
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 
 class NetworkFaultInjector(Node):
@@ -61,6 +63,7 @@ class NetworkFaultInjector(Node):
             self.publisher.publish(msg)
 
 
+
 class IMUFaultInjector(Node):
 
     def __init__(
@@ -68,25 +71,49 @@ class IMUFaultInjector(Node):
         robot_name="tb0_1",
         amplitude=0.0,
         frequency=0.0,
+        phase=0.0,
+        jitter_std_us=10.0,
         start_time=0.0,
+        duration=None,
+        seed=0,
     ):
         super().__init__(f"imu_fault_injector_{robot_name}")
 
-        if not all(
-            math.isfinite(value) and value >= 0
-            for value in (amplitude, frequency, start_time)
+        values = (amplitude, frequency, jitter_std_us, start_time)
+        if not all(math.isfinite(v) and v >= 0 for v in values):
+            raise ValueError("Acoustic parameters must be finite and non-negative")
+
+        if not math.isfinite(phase):
+            raise ValueError("Phase must be finite")
+
+        if duration is not None and (
+            not math.isfinite(duration) or duration <= 0
         ):
-            raise ValueError(
-                "Acoustic parameters must be finite and non-negative"
-            )
+            raise ValueError("Duration must be positive")
 
         self.robot_name = robot_name
         self.amplitude = amplitude
         self.frequency = frequency
+        self.phase = math.radians(phase)
+        self.jitter_std = jitter_std_us * 1e-6
         self.start_time = start_time
+        self.duration = duration
 
-        # Time origin: first received IMU sample.
+        self.rng = random.Random(seed)
         self.time_origin = None
+
+        start_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self.start_subscription = self.create_subscription(
+            Float64,
+            f"/{robot_name}/mission_start",
+            self.start_callback,
+            start_qos,
+        )
 
         self.subscription = self.create_subscription(
             Imu,
@@ -102,33 +129,53 @@ class IMUFaultInjector(Node):
         )
 
         self.get_logger().info(
-            f"Acoustic IMU Injector started: "
+            f"Acoustic Accelerometer Injector started: "
             f"robot={robot_name}, "
-            f"amplitude={amplitude} rad/s, "
+            f"amplitude={amplitude} m/s^2, "
             f"frequency={frequency} Hz, "
-            f"start_time={start_time} s"
+            f"phase={phase} deg, "
+            f"jitter_std={jitter_std_us} us, "
+            f"start_time={start_time} s, "
+            f"duration={duration}, "
+            f"seed={seed}"
         )
+
+    def start_callback(self, msg):
+        self.time_origin = msg.data
 
     def imu_callback(self, msg):
         faulty_msg = copy.deepcopy(msg)
 
-        now = time.monotonic()
-
         if self.time_origin is None:
-            self.time_origin = now
+            self.publisher.publish(faulty_msg)
+            return
 
-        elapsed = now - self.time_origin
+        elapsed = time.monotonic() - self.time_origin
 
-        if elapsed >= self.start_time:
-            attack_t = elapsed - self.start_time
+        attack_active = elapsed >= self.start_time
 
-            error = self.amplitude * math.sin(
-                2.0 * math.pi * self.frequency * attack_t
+        if self.duration is not None:
+            attack_active = (
+                attack_active
+                and elapsed < self.start_time + self.duration
             )
 
-            faulty_msg.angular_velocity.z += error
+        if attack_active:
+            jitter = self.rng.gauss(0.0, self.jitter_std)
+
+            attack_t = elapsed + jitter
+
+            error = self.amplitude * math.cos(
+                2.0 * math.pi * self.frequency * attack_t
+                + self.phase
+            )
+
+            faulty_msg.linear_acceleration.x += error
+            faulty_msg.linear_acceleration.y += error
+            faulty_msg.linear_acceleration.z += error
 
         self.publisher.publish(faulty_msg)
+
 
 class LiDARFaultInjector(Node):
 
@@ -248,6 +295,10 @@ def main():
     # IMU parameters
     parser.add_argument("--amplitude", type=float, default=0.0)
     parser.add_argument("--frequency", type=float, default=0.0)
+    parser.add_argument("--phase", type=float, default=0.0)
+    parser.add_argument("--jitter-std-us", type=float, default=10.0)
+    parser.add_argument("--duration", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=0)
 
     # LiDAR parameters
     parser.add_argument(
@@ -278,7 +329,11 @@ def main():
             robot_name=args.robot,
             amplitude=args.amplitude,
             frequency=args.frequency,
+            phase=args.phase,
+            jitter_std_us=args.jitter_std_us,
             start_time=args.start_time,
+            duration=args.duration,
+            seed=args.seed,
         )
     else:
         node = LiDARFaultInjector(

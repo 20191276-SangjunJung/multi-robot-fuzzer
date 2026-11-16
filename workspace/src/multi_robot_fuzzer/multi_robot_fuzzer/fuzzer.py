@@ -13,6 +13,8 @@ from pathlib import Path
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
+from std_msgs.msg import Float64
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 from multi_robot_fuzzer.scenario_manager import ScenarioManager
 from multi_robot_fuzzer.mission_executor import MissionExecutor
@@ -164,6 +166,7 @@ def run_test(test_number, test_case, result_file):
 
     injectors = []
     sensor_processes = []
+    start_nodes = []
 
     ros_executor = None
     ros_thread = None
@@ -280,25 +283,39 @@ def run_test(test_number, test_case, result_file):
                 amplitude = params["amplitude"]
                 frequency = params["frequency"]
                 attack_start = params["start_time"]
+                phase = params.get("phase", 0.0)
+                duration = params.get("duration")
 
                 print(
                     f"[IMU Attack] "
                     f"robot={name}, "
-                    f"A={amplitude} rad/s, "
+                    f"A={amplitude} m/s^2, "
                     f"f={frequency} Hz, "
-                    f"start={attack_start} s"
+                    f"phase={phase} deg, "
+                    f"start={attack_start} s, "
+                    f"duration={duration}"
                 )
 
-                # Acoustic gyroscope fault injector.
-                sensor_processes.append(
-                    start_process([
-                        "python3",
-                        INJECTOR_SCRIPT,
-                        "--robot", name,
-                        "--amplitude", str(amplitude),
-                        "--frequency", str(frequency),
-                        "--start-time", str(attack_start),
+                # Acoustic accelerometer fault injector.
+                command = [
+                    "python3",
+                    INJECTOR_SCRIPT,
+                    "--sensor", "imu",
+                    "--robot", name,
+                    "--amplitude", str(amplitude),
+                    "--frequency", str(frequency),
+                    "--phase", str(phase),
+                    "--start-time", str(attack_start),
+                    "--seed", str(test_number),
+                ]
+
+                if duration is not None:
+                    command.extend([
+                        "--duration", str(duration),
                     ])
+
+                sensor_processes.append(
+                    start_process(command)
                 )
 
                 # Load robot-specific EKF configuration.
@@ -420,9 +437,45 @@ def run_test(test_number, test_case, result_file):
 
             ros_thread.start()
 
+        # Publish a shared mission start timestamp.
+        def signal_mission_start(execution):
+            if not imu_faults:
+                return
+
+            qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+
+            publishers = []
+
+            for fault in imu_faults:
+                name = fault["target"]
+
+                node = rclpy.create_node(
+                    f"mission_start_{name}_{test_number}"
+                )
+                start_nodes.append(node)
+
+                publisher = node.create_publisher(
+                    Float64,
+                    f"/{name}/mission_start",
+                    qos,
+                )
+                publishers.append(publisher)
+
+            timestamp = time.monotonic()
+
+            for publisher in publishers:
+                msg = Float64()
+                msg.data = timestamp
+                publisher.publish(msg)
+
         # Execute mission.
         execution_result = mission_executor.execute(
-            on_prepared=prepare
+            on_prepared=prepare,
+            on_started=signal_mission_start,
         )
 
     except Exception as exc:
@@ -445,10 +498,10 @@ def run_test(test_number, test_case, result_file):
     finally:
         # Stop ROS executor.
         if ros_executor is not None:
-            ros_executor.shutdown()
+            ros_executor.shutdown(timeout_sec=5.0)
 
         if ros_thread is not None:
-            ros_thread.join(timeout=3.0)
+            ros_thread.join(timeout=5.0)
 
         for injector in injectors:
             injector.destroy_node()
@@ -456,6 +509,9 @@ def run_test(test_number, test_case, result_file):
         # Stop IMU and EKF processes.
         for proc in reversed(sensor_processes):
             stop_process(proc)
+
+        for node in start_nodes:
+            node.destroy_node()
 
         scenario.stop_simulation()
         time.sleep(2)
@@ -517,6 +573,28 @@ def choose_parameter(value, bounds, mode):
 
     return random.uniform(low, high)
 
+def choose_discrete_parameter(value, bounds, mode, minimum, maximum, step):
+    candidates = [
+        float(v)
+        for v in range(minimum, maximum + 1, step)
+        if bounds[0] <= v <= bounds[1]
+    ]
+
+    if not candidates:
+        raise ValueError(f"No valid candidates in range: {bounds}")
+
+    if value is not None:
+        if not math.isfinite(value) or not any(
+            math.isclose(value, v, abs_tol=1e-9) for v in candidates
+        ):
+            raise ValueError(f"Invalid discrete parameter: {value}")
+        return value
+
+    if mode == "fixed":
+        return candidates[0]
+
+    return random.choice(candidates)
+
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
@@ -568,14 +646,21 @@ def parse_args(args=None):
         "--imu-amplitude",
         type=float,
         default=None,
-        help="Gyroscope error amplitude (rad/s)",
+        help="Accelerometer error amplitude (m/s^2)",
     )
 
     parser.add_argument(
         "--imu-frequency",
         type=float,
         default=None,
-        help="Gyroscope error frequency (Hz)",
+        help="Acoustic frequency (Hz)",
+    )
+
+    parser.add_argument(
+        "--imu-phase",
+        type=float,
+        default=None,
+        choices=[0.0, 90.0, 180.0, 270.0],
     )
 
     parser.add_argument(
@@ -590,7 +675,7 @@ def parse_args(args=None):
         "--imu-amplitude-range",
         type=float,
         nargs=2,
-        default=[0.0, 0.05],
+        default=[0.0, 90.0],
         metavar=("MIN", "MAX"),
     )
 
@@ -598,7 +683,7 @@ def parse_args(args=None):
         "--imu-frequency-range",
         type=float,
         nargs=2,
-        default=[0.1, 2.0],
+        default=[5000.0, 5200.0],
         metavar=("MIN", "MAX"),
     )
 
@@ -638,7 +723,7 @@ def parse_args(args=None):
 
 
 def main(args=None):
-    options = parse_args(args)
+    options = parse_args(args)  
 
     test_count = (
         options.count
@@ -700,47 +785,88 @@ def main(args=None):
             try:
                 if options.mode == "fixed":
                     random.seed(options.seed)
-
                     test_case = generator.generate(
                         mission_name=options.mission,
                         world=options.world,
                     )
+                else:
+                    if options.imu_fault:
+                        test_case = generator.generate(
+                            mission_name=options.mission,
+                            world=options.world,
+                        )
+                    else:
+                        test_case = generator.generate()
 
-                    # Disable network delay
-                    # during fixed baseline tests.
-                    for fault in test_case.get(
-                        "faults", []
-                    ):
+                # Isolate sensor attacks from network delay.
+                if options.imu_fault:
+                    for fault in test_case.get("faults", []):
                         if (
                             fault["domain"] == "network"
                             and fault["type"] == "delay"
                         ):
-                            fault["parameters"][
-                                "delay_ms"
-                            ] = 0
-
-                else:
-                    test_case = generator.generate()
+                            fault["parameters"]["delay_ms"] = 0
+                elif options.mode == "fixed":
+                    for fault in test_case.get("faults", []):
+                        if (
+                            fault["domain"] == "network"
+                            and fault["type"] == "delay"
+                        ):
+                            fault["parameters"]["delay_ms"] = 0
 
                 # Add acoustic IMU faults.
                 if options.imu_fault:
-                    amplitude = choose_parameter(
+                    amplitude = choose_discrete_parameter(
                         options.imu_amplitude,
                         options.imu_amplitude_range,
                         options.mode,
+                        0, 90, 10,
                     )
 
-                    frequency = choose_parameter(
+                    frequency = choose_discrete_parameter(
                         options.imu_frequency,
                         options.imu_frequency_range,
                         options.mode,
+                        5000, 5200, 5,
                     )
 
-                    attack_start = choose_parameter(
-                        options.imu_start_time,
-                        options.imu_start_time_range,
-                        options.mode,
+                    phase = (
+                        options.imu_phase
+                        if options.imu_phase is not None
+                        else (
+                            0.0 if options.mode == "fixed"
+                            else random.choice([0.0, 90.0, 180.0, 270.0])
+                        )
                     )
+
+                    duration = None
+
+                    if options.mode == "fixed":
+                        attack_start = (
+                            options.imu_start_time
+                            if options.imu_start_time is not None
+                            else 0.0
+                        )
+
+                    else:
+                        # 80% continuous, 20% finite attack.
+                        finite = random.random() < 0.2
+
+                        if finite:
+                            duration = random.choice([2.0, 5.0, 10.0])
+
+                        attack_start = (
+                            options.imu_start_time
+                            if options.imu_start_time is not None
+                            else choose_parameter(
+                                None,
+                                options.imu_start_time_range,
+                                options.mode,
+                            )
+                        )
+
+                    if not math.isfinite(attack_start) or attack_start < 0:
+                        raise ValueError("Invalid IMU attack start time")
 
                     generator.add_imu_faults(
                         test_case,
@@ -748,6 +874,14 @@ def main(args=None):
                         frequency=frequency,
                         start_time=attack_start,
                     )
+
+                    for fault in test_case["faults"]:
+                        if (
+                            fault.get("domain") == "sensor"
+                            and fault.get("sensor") == "imu"
+                        ):
+                            fault["parameters"]["phase"] = phase
+                            fault["parameters"]["duration"] = duration
 
                 # Add LiDAR faults.
                 if options.lidar_fault:
