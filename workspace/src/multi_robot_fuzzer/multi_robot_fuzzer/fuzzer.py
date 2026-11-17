@@ -285,22 +285,26 @@ def run_test(test_number, test_case, result_file):
                 attack_start = params["start_time"]
                 phase = params.get("phase", 0.0)
                 duration = params.get("duration")
+                imu_target = params.get("imu_target", "accelerometer")
 
                 print(
                     f"[IMU Attack] "
                     f"robot={name}, "
-                    f"A={amplitude} m/s^2, "
+                    f"target={imu_target}, "
+                    f"A={amplitude} "
+                    f"{'m/s^2' if imu_target == 'accelerometer' else 'rad/s'}, "
                     f"f={frequency} Hz, "
                     f"phase={phase} deg, "
                     f"start={attack_start} s, "
                     f"duration={duration}"
                 )
 
-                # Acoustic accelerometer fault injector.
+                # Acoustic IMU fault injector.
                 command = [
                     "python3",
                     INJECTOR_SCRIPT,
                     "--sensor", "imu",
+                    "--imu-target", imu_target,
                     "--robot", name,
                     "--amplitude", str(amplitude),
                     "--frequency", str(frequency),
@@ -637,7 +641,7 @@ def parse_args(args=None):
     # IMU attack type.
     parser.add_argument(
         "--imu-fault",
-        choices=["acoustic"],
+        choices=["acoustic", "gyro_acoustic"],
         default=None,
     )
 
@@ -660,7 +664,7 @@ def parse_args(args=None):
         "--imu-phase",
         type=float,
         default=None,
-        choices=[0.0, 90.0, 180.0, 270.0],
+        help="Acoustic phase (degrees)",
     )
 
     parser.add_argument(
@@ -686,6 +690,22 @@ def parse_args(args=None):
         default=[5000.0, 5200.0],
         metavar=("MIN", "MAX"),
     )
+
+    parser.add_argument(
+        "--gyro-amplitude-range",
+        type=float,
+        nargs=2,
+        default=[0.0, 4.0],
+        metavar=("MIN", "MAX"),
+    )
+
+    parser.add_argument(
+        "--gyro-frequency-range",
+        type=float,
+        nargs=2,
+        default=[0.0, 200.0],
+        metavar=("MIN", "MAX"),
+    )    
 
     parser.add_argument(
         "--imu-start-time-range",
@@ -777,6 +797,9 @@ def main(args=None):
 
     generator = TestCaseGenerator()
 
+    if options.mode == "random":
+        random.seed(options.seed)
+
     try:
         for index in range(
             1,
@@ -816,18 +839,24 @@ def main(args=None):
 
                 # Add acoustic IMU faults.
                 if options.imu_fault:
-                    amplitude = choose_discrete_parameter(
+
+                    if options.imu_fault == "gyro_acoustic":
+                        amplitude_range = options.gyro_amplitude_range
+                        frequency_range = options.gyro_frequency_range
+                    else:
+                        amplitude_range = options.imu_amplitude_range
+                        frequency_range = options.imu_frequency_range
+
+                    amplitude = choose_parameter(
                         options.imu_amplitude,
-                        options.imu_amplitude_range,
+                        amplitude_range,
                         options.mode,
-                        0, 90, 10,
                     )
 
-                    frequency = choose_discrete_parameter(
+                    frequency = choose_parameter(
                         options.imu_frequency,
-                        options.imu_frequency_range,
+                        frequency_range,
                         options.mode,
-                        5000, 5200, 5,
                     )
 
                     phase = (
@@ -835,9 +864,12 @@ def main(args=None):
                         if options.imu_phase is not None
                         else (
                             0.0 if options.mode == "fixed"
-                            else random.choice([0.0, 90.0, 180.0, 270.0])
+                            else random.uniform(0.0, 360.0)
                         )
                     )
+
+                    if not math.isfinite(phase) or not 0.0 <= phase < 360.0:
+                        raise ValueError("IMU phase must be in [0, 360) degrees")
 
                     duration = None
 
@@ -853,7 +885,7 @@ def main(args=None):
                         finite = random.random() < 0.2
 
                         if finite:
-                            duration = random.choice([2.0, 5.0, 10.0])
+                            duration = random.uniform(2.0, 10.0)
 
                         attack_start = (
                             options.imu_start_time
@@ -882,6 +914,11 @@ def main(args=None):
                         ):
                             fault["parameters"]["phase"] = phase
                             fault["parameters"]["duration"] = duration
+                            fault["parameters"]["imu_target"] = (
+                                "gyroscope"
+                                if options.imu_fault == "gyro_acoustic"
+                                else "accelerometer"
+                            )
 
                 # Add LiDAR faults.
                 if options.lidar_fault:

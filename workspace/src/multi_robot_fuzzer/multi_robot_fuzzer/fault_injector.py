@@ -69,6 +69,7 @@ class IMUFaultInjector(Node):
     def __init__(
         self,
         robot_name="tb0_1",
+        imu_target="accelerometer",
         amplitude=0.0,
         frequency=0.0,
         phase=0.0,
@@ -78,6 +79,11 @@ class IMUFaultInjector(Node):
         seed=0,
     ):
         super().__init__(f"imu_fault_injector_{robot_name}")
+
+        if imu_target not in ("accelerometer", "gyroscope"):
+            raise ValueError(f"Invalid IMU target: {imu_target}")
+
+        self.imu_target = imu_target        
 
         values = (amplitude, frequency, jitter_std_us, start_time)
         if not all(math.isfinite(v) and v >= 0 for v in values):
@@ -129,9 +135,10 @@ class IMUFaultInjector(Node):
         )
 
         self.get_logger().info(
-            f"Acoustic Accelerometer Injector started: "
+            f"Acoustic {imu_target} Injector started: "
             f"robot={robot_name}, "
-            f"amplitude={amplitude} m/s^2, "
+            f"amplitude={amplitude} "
+            f"{'m/s^2' if imu_target == 'accelerometer' else 'rad/s'}, "
             f"frequency={frequency} Hz, "
             f"phase={phase} deg, "
             f"jitter_std={jitter_std_us} us, "
@@ -163,16 +170,22 @@ class IMUFaultInjector(Node):
         if attack_active:
             jitter = self.rng.gauss(0.0, self.jitter_std)
 
-            attack_t = elapsed + jitter
+            attack_t = elapsed - self.start_time + jitter
 
             error = self.amplitude * math.cos(
                 2.0 * math.pi * self.frequency * attack_t
                 + self.phase
             )
 
-            faulty_msg.linear_acceleration.x += error
-            faulty_msg.linear_acceleration.y += error
-            faulty_msg.linear_acceleration.z += error
+            if self.imu_target == "accelerometer":
+                faulty_msg.linear_acceleration.x += error
+                faulty_msg.linear_acceleration.y += error
+                faulty_msg.linear_acceleration.z += error
+
+            else:
+                faulty_msg.angular_velocity.x += error
+                faulty_msg.angular_velocity.y += error
+                faulty_msg.angular_velocity.z += error
 
         self.publisher.publish(faulty_msg)
 
@@ -290,6 +303,12 @@ def main():
         default="imu",
     )
 
+    parser.add_argument(
+        "--imu-target",
+        choices=["accelerometer", "gyroscope"],
+        default="accelerometer",
+    )
+
     parser.add_argument("--robot", default="tb0_1")
 
     # IMU parameters
@@ -334,6 +353,7 @@ def main():
             start_time=args.start_time,
             duration=args.duration,
             seed=args.seed,
+            imu_target=args.imu_target,
         )
     else:
         node = LiDARFaultInjector(
