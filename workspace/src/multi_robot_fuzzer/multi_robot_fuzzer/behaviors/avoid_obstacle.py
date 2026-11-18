@@ -52,6 +52,8 @@ class AvoidObstacle(Node):
                 + i * self.scan_data.angle_increment
             )
 
+            angle = (angle + math.pi) % (2 * math.pi) - math.pi
+
             if start_angle <= angle <= end_angle:
 
                 if (
@@ -102,13 +104,10 @@ class AvoidObstacle(Node):
         if self.scan_data is None:
             return None
 
-        (
-            front_distance,
-            left_distance,
-            right_distance,
-        ) = self.get_obstacle_distances()
+        front_distance, left_distance, right_distance = (
+            self.get_obstacle_distances()
+        )
 
-        # 전방이 안전하면 회피할 필요 없음
         if front_distance > self.safe_distance:
             return None
 

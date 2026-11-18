@@ -101,9 +101,7 @@ class AvoidanceMux(Node):
         if avoidance_command is not None:
             self.safe_pub.publish(avoidance_command)
         else:
-            self.safe_pub.publish(
-                self.latest_command
-            )
+            self.safe_pub.publish(self.latest_command)
 
     def stop(self):
         self.enabled = False
@@ -168,8 +166,10 @@ class MissionExecutor:
             )
 
     def _avoidance_robots(self, spec):
-        if "robots" in spec:
-            return list(spec["robots"])
+        params = spec.get("parameters", {})
+
+        if "robots" in params:
+            return list(params["robots"])
 
         if "robot" in spec:
             return [spec["robot"]]
@@ -189,9 +189,15 @@ class MissionExecutor:
                         f"Duplicate avoidance: {robot_name}"
                     )
 
+                mux_params = {
+                    key: value
+                    for key, value in params.items()
+                    if key != "robots"
+                }
+
                 self.muxes[robot_name] = AvoidanceMux(
                     robot_name=robot_name,
-                    **params,
+                    **mux_params,
                 )
 
         for index, spec in enumerate(

@@ -219,6 +219,9 @@ def run_test(test_number, test_case, result_file):
                 f"[LiDAR Attack] robot={name}, "
                 f"type={attack_type}, "
                 f"sector={params['sector']}, "
+                f"angle={params['attack_angle']} deg, "
+                f"width={int(params['angular_width'])} beam(s), "
+                f"distance={params['ghost_distance']} m, "
                 f"start={params['start_time']} s"
             )
 
@@ -230,6 +233,10 @@ def run_test(test_number, test_case, result_file):
                     "--robot", name,
                     "--attack-type", attack_type,
                     "--sector", params["sector"],
+                    "--attack-angle",
+                    str(params["attack_angle"]),
+                    "--angular-width",
+                    str(params["angular_width"]),
                     "--ghost-distance",
                     str(params["ghost_distance"]),
                     "--start-time",
@@ -443,7 +450,9 @@ def run_test(test_number, test_case, result_file):
 
         # Publish a shared mission start timestamp.
         def signal_mission_start(execution):
-            if not imu_faults:
+            sensor_faults = imu_faults + lidar_faults
+
+            if not sensor_faults:
                 return
 
             qos = QoSProfile(
@@ -454,9 +463,11 @@ def run_test(test_number, test_case, result_file):
 
             publishers = []
 
-            for fault in imu_faults:
-                name = fault["target"]
+            robot_names = set(
+                fault["target"] for fault in sensor_faults
+            )
 
+            for name in sorted(robot_names):
                 node = rclpy.create_node(
                     f"mission_start_{name}_{test_number}"
                 )
@@ -467,6 +478,7 @@ def run_test(test_number, test_case, result_file):
                     f"/{name}/mission_start",
                     qos,
                 )
+
                 publishers.append(publisher)
 
             timestamp = time.monotonic()
@@ -728,6 +740,19 @@ def parse_args(args=None):
     )
 
     parser.add_argument(
+        "--lidar-attack-angle",
+        type=float,
+        default=0.0,
+    )
+
+    parser.add_argument(
+        "--lidar-angular-width",
+        type=float,
+        choices=[0.0, 1.0],
+        default=0.0,
+    )
+
+    parser.add_argument(
         "--lidar-ghost-distance",
         type=float,
         default=0.3,
@@ -926,6 +951,8 @@ def main(args=None):
                         test_case,
                         attack_type=options.lidar_fault,
                         sector=options.lidar_sector,
+                        attack_angle=options.lidar_attack_angle,
+                        angular_width=options.lidar_angular_width,
                         ghost_distance=options.lidar_ghost_distance,
                         start_time=options.lidar_start_time,
                     )

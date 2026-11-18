@@ -205,6 +205,8 @@ class LiDARFaultInjector(Node):
         robot_name="tb0_1",
         attack_type="removal",
         sector="front",
+        attack_angle=0.0,
+        angular_width=0.0,
         ghost_distance=0.3,
         start_time=0.0,
     ):
@@ -216,18 +218,52 @@ class LiDARFaultInjector(Node):
         if sector not in self.SECTORS:
             raise ValueError("Invalid LiDAR sector")
 
+        if not math.isfinite(attack_angle):
+            raise ValueError("Invalid attack angle")
+
+        self.sector = sector
+
+        if not self.in_sector(
+            (attack_angle + 180.0) % 360.0 - 180.0
+        ):
+            raise ValueError("Attack angle is outside the selected sector")
+
+        if angular_width not in (0.0, 1.0):
+            raise ValueError("Angular width must be 0 or 1 beam")
+
         if not math.isfinite(start_time) or start_time < 0:
             raise ValueError("Invalid start time")
 
-        if not math.isfinite(ghost_distance) or ghost_distance <= 0:
-            raise ValueError("Invalid ghost distance")
+        if not math.isfinite(ghost_distance) or not (
+            0.12 <= ghost_distance <= 3.5
+        ):
+            raise ValueError("Ghost distance must be in [0.12, 3.5] m")
 
         self.robot_name = robot_name
         self.attack_type = attack_type
         self.sector = sector
+        self.attack_angle = (
+            (attack_angle + 180.0) % 360.0 - 180.0
+        )
+        self.angular_width = angular_width
         self.ghost_distance = ghost_distance
         self.start_time = start_time
+
         self.time_origin = None
+        self.attack_applied = False
+
+        start_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self.start_subscription = self.create_subscription(
+            Float64,
+            f"/{robot_name}/mission_start",
+            self.start_callback,
+            start_qos,
+        )
 
         self.subscription = self.create_subscription(
             LaserScan,
@@ -247,8 +283,10 @@ class LiDARFaultInjector(Node):
             f"robot={robot_name}, "
             f"type={attack_type}, "
             f"sector={sector}, "
-            f"ghost_distance={ghost_distance}, "
-            f"start_time={start_time}"
+            f"attack_angle={self.attack_angle} deg, "
+            f"angular_width={int(angular_width)} beam(s), "
+            f"ghost_distance={ghost_distance} m, "
+            f"start_time={start_time} s"
         )
 
     def in_sector(self, angle_deg):
@@ -257,39 +295,112 @@ class LiDARFaultInjector(Node):
                 return True
         return False
 
+    def start_callback(self, msg):
+        self.time_origin = msg.data
+
     def scan_callback(self, msg):
         faulty_msg = copy.deepcopy(msg)
 
-        now = time.monotonic()
+        if self.time_origin is None or self.attack_applied:
+            self.publisher.publish(faulty_msg)
+            return
 
-        if self.time_origin is None:
-            self.time_origin = now
+        elapsed = time.monotonic() - self.time_origin
 
-        elapsed = now - self.time_origin
+        if elapsed < self.start_time:
+            self.publisher.publish(faulty_msg)
+            return
 
-        if elapsed >= self.start_time:
+        if not math.isfinite(msg.angle_increment) or msg.angle_increment <= 0:
+            self.get_logger().error("Invalid LaserScan angle_increment")
+            self.publisher.publish(faulty_msg)
+            return
 
-            for i, distance in enumerate(faulty_msg.ranges):
+        modified = []
 
-                angle_deg = (
-                    math.degrees(
-                        msg.angle_min + i * msg.angle_increment
-                    ) + 180
-                ) % 360 - 180
+        beam_count = len(msg.ranges)
 
-                if not self.in_sector(angle_deg):
+        if beam_count == 0:
+            self.get_logger().error("Empty LaserScan ranges")
+            self.publisher.publish(faulty_msg)
+            return
+
+        center_index = min(
+            range(beam_count),
+            key=lambda i: abs(
+                (
+                    (
+                        math.degrees(
+                            msg.angle_min + i * msg.angle_increment
+                        )
+                        - self.attack_angle
+                        + 180.0
+                    ) % 360.0
+                ) - 180.0
+            ),
+        )
+
+        selected_indices = {
+            (center_index + offset) % beam_count
+            for offset in range(
+                -int(self.angular_width),
+                int(self.angular_width) + 1
+            )
+        }
+
+        for i, distance in enumerate(msg.ranges):
+            if i not in selected_indices:
+                continue
+
+            angle_deg = (
+                math.degrees(
+                    msg.angle_min + i * msg.angle_increment
+                ) + 180.0
+            ) % 360.0 - 180.0
+
+            if not self.in_sector(angle_deg):
+                continue
+
+            if self.attack_type == "ghost":
+                if not (
+                    msg.range_min <= self.ghost_distance <= msg.range_max
+                ):
+                    self.get_logger().error(
+                        "Ghost distance outside LaserScan range"
+                    )
+                    break
+
+                new_distance = self.ghost_distance
+
+            else:
+                if not (
+                    math.isfinite(distance)
+                    and msg.range_min <= distance <= msg.range_max
+                ):
                     continue
 
-                if self.attack_type == "removal":
-                    if (
-                        math.isfinite(distance)
-                        and msg.range_min <= distance <= msg.range_max
-                    ):
-                        faulty_msg.ranges[i] = float("inf")
+                new_distance = float("inf")
 
-                elif self.attack_type == "ghost":
-                    if msg.range_min <= self.ghost_distance <= msg.range_max:
-                        faulty_msg.ranges[i] = self.ghost_distance
+            faulty_msg.ranges[i] = new_distance
+            modified.append((i, angle_deg, distance, new_distance))
+
+        self.attack_applied = True
+
+        if modified:
+            self.get_logger().info(
+                f"LiDAR attack applied: "
+                f"robot={self.robot_name}, "
+                f"type={self.attack_type}, "
+                f"elapsed={elapsed:.3f}s, "
+                f"beams={modified}"
+            )
+        else:
+            self.get_logger().warning(
+                f"LiDAR attack not applied: "
+                f"robot={self.robot_name}, "
+                f"elapsed={elapsed:.3f}s, "
+                f"no eligible beams"
+            )
 
         self.publisher.publish(faulty_msg)
 
@@ -331,6 +442,17 @@ def main():
         default="front",
     )
     parser.add_argument(
+        "--attack-angle",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--angular-width",
+        type=float,
+        choices=[0.0, 1.0],
+        default=0.0,
+    )
+    parser.add_argument(
         "--ghost-distance",
         type=float,
         default=0.3,
@@ -360,6 +482,8 @@ def main():
             robot_name=args.robot,
             attack_type=args.attack_type,
             sector=args.sector,
+            attack_angle=args.attack_angle,
+            angular_width=args.angular_width,
             ghost_distance=args.ghost_distance,
             start_time=args.start_time,
         )

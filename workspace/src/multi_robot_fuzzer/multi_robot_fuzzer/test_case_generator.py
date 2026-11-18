@@ -448,6 +448,8 @@ class TestCaseGenerator:
         test_case,
         attack_type,
         sector,
+        attack_angle,
+        angular_width,
         ghost_distance,
         start_time,
     ):
@@ -469,6 +471,8 @@ class TestCaseGenerator:
                 "target": robot["name"],
                 "parameters": {
                     "sector": sector,
+                    "attack_angle": attack_angle,
+                    "angular_width": angular_width,
                     "ghost_distance": ghost_distance,
                     "start_time": start_time,
                 },
