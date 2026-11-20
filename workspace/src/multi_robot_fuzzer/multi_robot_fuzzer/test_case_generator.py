@@ -453,6 +453,11 @@ class TestCaseGenerator:
         ghost_distance,
         start_time,
     ):
+        if attack_type not in ("ghost", "removal"):
+            raise ValueError(
+                f"Unsupported LiDAR attack type: {attack_type}"
+            )
+
         faults = test_case.setdefault("faults", [])
 
         faults[:] = [
@@ -463,19 +468,23 @@ class TestCaseGenerator:
             )
         ]
 
+        parameters = {
+            "sector": sector,
+            "attack_angle": attack_angle,
+            "angular_width": angular_width,
+            "start_time": start_time,
+        }
+
+        if attack_type == "ghost":
+            parameters["ghost_distance"] = ghost_distance
+
         for robot in test_case["scenario"]["robots"]:
             faults.append({
                 "domain": "sensor",
                 "sensor": "lidar",
                 "type": attack_type,
                 "target": robot["name"],
-                "parameters": {
-                    "sector": sector,
-                    "attack_angle": attack_angle,
-                    "angular_width": angular_width,
-                    "ghost_distance": ghost_distance,
-                    "start_time": start_time,
-                },
+                "parameters": parameters.copy(),
             })
 
         return test_case

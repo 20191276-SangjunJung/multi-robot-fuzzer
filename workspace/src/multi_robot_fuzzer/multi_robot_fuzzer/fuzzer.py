@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import rclpy
@@ -25,7 +26,7 @@ from multi_robot_fuzzer.test_case_generator import TestCaseGenerator
 
 TEST_COUNT = 3
 
-RESULT_FILE = "/workspace/fuzzing_results_v2.csv"
+RESULT_FILE = "/workspace/fuzzing_results_v3.csv"
 EKF_CONFIG = "/workspace/src/multi_robot_fuzzer/config/ekf.yaml"
 INJECTOR_SCRIPT = (
     "/workspace/src/multi_robot_fuzzer/"
@@ -72,6 +73,7 @@ CSV_FIELDS = [
     "scenario_json",
     "mission_json",
     "faults_json",
+    "fault_feedback_json",
     "execution_status",
     "execution_reason",
     "behavior_results_json",
@@ -87,6 +89,7 @@ def save_result(
     test_case,
     oracle_result,
     execution_result,
+    fault_feedback,
 ):
     file_exists = os.path.exists(filename)
 
@@ -111,6 +114,11 @@ def save_result(
         "faults_json": json.dumps(
             test_case.get("faults", []),
             ensure_ascii=False,
+        ),
+        "fault_feedback_json": json.dumps(
+            fault_feedback,
+            ensure_ascii=False,
+            allow_nan=False,
         ),
         "execution_status": execution_result.get(
             "status", "ERROR"
@@ -164,6 +172,14 @@ def run_test(test_number, test_case, result_file):
 
     scenario = ScenarioManager()
 
+    feedback_dir = Path(
+        "/workspace/logs/fault_feedback"
+    ) / f"test_{test_number}_{uuid.uuid4().hex}"
+
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+
+    feedback_files = {}
+
     injectors = []
     sensor_processes = []
     start_nodes = []
@@ -215,33 +231,57 @@ def run_test(test_number, test_case, result_file):
                     f"Unsupported LiDAR fault: {attack_type}"
                 )
 
-            print(
+            log_message = (
                 f"[LiDAR Attack] robot={name}, "
                 f"type={attack_type}, "
                 f"sector={params['sector']}, "
                 f"angle={params['attack_angle']} deg, "
-                f"width={int(params['angular_width'])} beam(s), "
-                f"distance={params['ghost_distance']} m, "
+                f"width={params['angular_width']} deg, "
                 f"start={params['start_time']} s"
             )
 
-            sensor_processes.append(
-                start_process([
-                    "python3",
-                    INJECTOR_SCRIPT,
-                    "--sensor", "lidar",
-                    "--robot", name,
-                    "--attack-type", attack_type,
-                    "--sector", params["sector"],
-                    "--attack-angle",
-                    str(params["attack_angle"]),
-                    "--angular-width",
-                    str(params["angular_width"]),
+            command = [
+                "python3",
+                INJECTOR_SCRIPT,
+                "--sensor", "lidar",
+                "--robot", name,
+                "--attack-type", attack_type,
+                "--sector", params["sector"],
+                "--attack-angle",
+                str(params["attack_angle"]),
+                "--angular-width",
+                str(params["angular_width"]),
+                "--start-time",
+                str(params["start_time"]),
+            ]
+
+            if attack_type == "ghost":
+                ghost_distance = params["ghost_distance"]
+
+                log_message += (
+                    f", distance={ghost_distance} m"
+                )
+
+                command.extend([
                     "--ghost-distance",
-                    str(params["ghost_distance"]),
-                    "--start-time",
-                    str(params["start_time"]),
+                    str(ghost_distance),
                 ])
+
+            feedback_file = (
+                feedback_dir / f"lidar_{name}.json"
+            )
+
+            feedback_files[f"lidar:{name}"] = feedback_file
+
+            command.extend([
+                "--feedback-file",
+                str(feedback_file),
+            ])
+
+            print(log_message)
+
+            sensor_processes.append(
+                start_process(command)
             )
 
         if lidar_faults:
@@ -324,6 +364,17 @@ def run_test(test_number, test_case, result_file):
                     command.extend([
                         "--duration", str(duration),
                     ])
+
+                feedback_file = (
+                    feedback_dir / f"imu_{name}.json"
+                )
+
+                feedback_files[f"imu:{name}"] = feedback_file
+
+                command.extend([
+                    "--feedback-file",
+                    str(feedback_file),
+                ])
 
                 sensor_processes.append(
                     start_process(command)
@@ -532,6 +583,40 @@ def run_test(test_number, test_case, result_file):
         scenario.stop_simulation()
         time.sleep(2)
 
+    fault_feedback = {}
+
+    for key, feedback_file in feedback_files.items():
+        if not feedback_file.exists():
+            fault_feedback[key] = {
+                "feedback_status": "missing",
+                "feedback_file": str(feedback_file),
+            }
+            continue
+
+        try:
+            with open(
+                feedback_file,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                data = json.load(file)
+
+            data["feedback_status"] = (
+                "complete"
+                if data.get("feedback_complete", False)
+                else "partial"
+            )
+
+            data["feedback_file"] = str(feedback_file)
+            fault_feedback[key] = data
+
+        except (OSError, ValueError) as exc:
+            fault_feedback[key] = {
+                "feedback_status": "read_error",
+                "feedback_file": str(feedback_file),
+                "error": repr(exc),
+            }
+
     # Evaluate mission result.
     oracle = BugOracle()
 
@@ -553,6 +638,7 @@ def run_test(test_number, test_case, result_file):
         test_case,
         result,
         execution_result,
+        fault_feedback,
     )
 
     return result

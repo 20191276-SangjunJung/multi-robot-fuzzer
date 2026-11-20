@@ -1,6 +1,9 @@
 import argparse
 import copy
+import json
 import math
+import os
+import signal
 import time
 import random
 from collections import deque
@@ -12,7 +15,38 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Float64
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.executors import ExternalShutdownException
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
+def save_fault_feedback(filename, data):
+    if filename is None:
+        return
+
+    directory = os.path.dirname(filename)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    temp_file = f"{filename}.tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as file:
+        json.dump(
+            data,
+            file,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+
+    os.replace(temp_file, filename)
+
+
+def serialize_distance(value):
+    if math.isnan(value):
+        return "nan"
+    if value == float("inf"):
+        return "inf"
+    if value == float("-inf"):
+        return "-inf"
+    return float(value)
 
 class NetworkFaultInjector(Node):
 
@@ -77,6 +111,7 @@ class IMUFaultInjector(Node):
         start_time=0.0,
         duration=None,
         seed=0,
+        feedback_file=None,
     ):
         super().__init__(f"imu_fault_injector_{robot_name}")
 
@@ -107,6 +142,43 @@ class IMUFaultInjector(Node):
 
         self.rng = random.Random(seed)
         self.time_origin = None
+
+        self.feedback_file = feedback_file
+        self.feedback = {
+            "sensor": "imu",
+            "robot": robot_name,
+            "attack_type": "acoustic",
+            "target": imu_target,
+            "configured_start_time": start_time,
+            "configured_duration": duration,
+            "configured_amplitude": amplitude,
+            "configured_frequency": frequency,
+            "configured_phase_deg": phase,
+            "configured_jitter_std_us": jitter_std_us,
+            "seed": seed,
+            "mission_start_received": False,
+            "attack_triggered": False,
+            "message_count": 0,
+            "attacked_message_count": 0,
+            "nonzero_error_count": 0,
+            "first_attack_elapsed": None,
+            "last_attack_elapsed": None,
+            "first_nonzero_elapsed": None,
+            "last_nonzero_elapsed": None,
+            "max_abs_error": 0.0,
+            "sum_squared_error": 0.0,
+            "sum_error": 0.0,
+            "min_error": None,
+            "max_error": None,
+            "feedback_complete": False,
+        }
+
+        self.feedback_timer = self.create_timer(
+            0.5,
+            self.flush_feedback,
+        )
+
+        self.flush_feedback()
 
         start_qos = QoSProfile(
             depth=1,
@@ -149,12 +221,31 @@ class IMUFaultInjector(Node):
 
     def start_callback(self, msg):
         self.time_origin = msg.data
+        self.feedback["mission_start_received"] = True
+
+    def flush_feedback(self):
+        data = self.feedback.copy()
+
+        count = data["attacked_message_count"]
+
+        data["rms_error"] = (
+            math.sqrt(data["sum_squared_error"] / count)
+            if count > 0 else None
+        )
+
+        data["mean_error"] = (
+            data["sum_error"] / count
+            if count > 0 else None
+        )
+
+        save_fault_feedback(self.feedback_file, data)
 
     def imu_callback(self, msg):
         faulty_msg = copy.deepcopy(msg)
 
         if self.time_origin is None:
             self.publisher.publish(faulty_msg)
+            self.feedback["message_count"] += 1
             return
 
         elapsed = time.monotonic() - self.time_origin
@@ -166,6 +257,8 @@ class IMUFaultInjector(Node):
                 attack_active
                 and elapsed < self.start_time + self.duration
             )
+
+        error = 0.0
 
         if attack_active:
             jitter = self.rng.gauss(0.0, self.jitter_std)
@@ -181,13 +274,50 @@ class IMUFaultInjector(Node):
                 faulty_msg.linear_acceleration.x += error
                 faulty_msg.linear_acceleration.y += error
                 faulty_msg.linear_acceleration.z += error
-
             else:
                 faulty_msg.angular_velocity.x += error
                 faulty_msg.angular_velocity.y += error
                 faulty_msg.angular_velocity.z += error
 
         self.publisher.publish(faulty_msg)
+
+        self.feedback["message_count"] += 1
+
+        if attack_active:
+            feedback = self.feedback
+
+            feedback["attack_triggered"] = True
+            feedback["attacked_message_count"] += 1
+            feedback["last_attack_elapsed"] = elapsed
+
+            if feedback["first_attack_elapsed"] is None:
+                feedback["first_attack_elapsed"] = elapsed
+
+            feedback["sum_error"] += error
+            feedback["sum_squared_error"] += error * error
+
+            feedback["max_abs_error"] = max(
+                feedback["max_abs_error"],
+                abs(error),
+            )
+
+            if feedback["min_error"] is None:
+                feedback["min_error"] = error
+                feedback["max_error"] = error
+            else:
+                feedback["min_error"] = min(
+                    feedback["min_error"], error
+                )
+                feedback["max_error"] = max(
+                    feedback["max_error"], error
+                )
+
+            if error != 0.0:
+                feedback["nonzero_error_count"] += 1
+                feedback["last_nonzero_elapsed"] = elapsed
+
+                if feedback["first_nonzero_elapsed"] is None:
+                    feedback["first_nonzero_elapsed"] = elapsed
 
 
 class LiDARFaultInjector(Node):
@@ -209,6 +339,7 @@ class LiDARFaultInjector(Node):
         angular_width=0.0,
         ghost_distance=0.3,
         start_time=0.0,
+        feedback_file=None,
     ):
         super().__init__(f"lidar_fault_injector_{robot_name}")
 
@@ -234,10 +365,11 @@ class LiDARFaultInjector(Node):
         if not math.isfinite(start_time) or start_time < 0:
             raise ValueError("Invalid start time")
 
-        if not math.isfinite(ghost_distance) or not (
-            0.12 <= ghost_distance <= 3.5
-        ):
-            raise ValueError("Ghost distance must be in [0.12, 3.5] m")
+        if attack_type == "ghost":
+            if not math.isfinite(ghost_distance) or not (
+                0.12 <= ghost_distance <= 3.5
+            ):
+                raise ValueError("Ghost distance must be in [0.12, 3.5] m")
 
         self.robot_name = robot_name
         self.attack_type = attack_type
@@ -251,6 +383,31 @@ class LiDARFaultInjector(Node):
 
         self.time_origin = None
         self.attack_applied = False
+
+        self.feedback_file = feedback_file
+        self.feedback = {
+            "sensor": "lidar",
+            "robot": robot_name,
+            "attack_type": attack_type,
+            "sector": sector,
+            "configured_angle_deg": self.attack_angle,
+            "configured_width_deg": angular_width,
+            "configured_start_time": start_time,
+            "configured_ghost_distance": (
+                ghost_distance if attack_type == "ghost" else None
+            ),
+            "mission_start_received": False,
+            "attack_triggered": False,
+            "attack_applied": False,
+            "measurement_changed": False,
+            "actual_elapsed": None,
+            "selected_beams": [],
+            "modified_count": 0,
+            "modified_beams": [],
+            "feedback_complete": False,
+        }
+
+        save_fault_feedback(self.feedback_file, self.feedback)
 
         start_qos = QoSProfile(
             depth=1,
@@ -284,9 +441,12 @@ class LiDARFaultInjector(Node):
             f"type={attack_type}, "
             f"sector={sector}, "
             f"attack_angle={self.attack_angle} deg, "
-            f"angular_width={int(angular_width)} beam(s), "
-            f"ghost_distance={ghost_distance} m, "
+            f"angular_width={angular_width} deg, "
             f"start_time={start_time} s"
+            + (
+                f", ghost_distance={ghost_distance} m"
+                if attack_type == "ghost" else ""
+            )
         )
 
     def in_sector(self, angle_deg):
@@ -297,6 +457,7 @@ class LiDARFaultInjector(Node):
 
     def start_callback(self, msg):
         self.time_origin = msg.data
+        self.feedback["mission_start_received"] = True
 
     def scan_callback(self, msg):
         faulty_msg = copy.deepcopy(msg)
@@ -382,30 +543,52 @@ class LiDARFaultInjector(Node):
                 new_distance = float("inf")
 
             faulty_msg.ranges[i] = new_distance
-            modified.append((i, angle_deg, distance, new_distance))
 
-        self.attack_applied = True
-
-        if modified:
-            self.get_logger().info(
-                f"LiDAR attack applied: "
-                f"robot={self.robot_name}, "
-                f"type={self.attack_type}, "
-                f"elapsed={elapsed:.3f}s, "
-                f"beams={modified}"
-            )
-        else:
-            self.get_logger().warning(
-                f"LiDAR attack not applied: "
-                f"robot={self.robot_name}, "
-                f"elapsed={elapsed:.3f}s, "
-                f"no eligible beams"
-            )
+            if distance != new_distance:
+                modified.append(
+                    (i, angle_deg, distance, new_distance)
+                )
 
         self.publisher.publish(faulty_msg)
 
+        self.attack_applied = True
+
+        self.feedback.update({
+            "attack_triggered": True,
+            "attack_applied": True,
+            "measurement_changed": len(modified) > 0,
+            "actual_elapsed": elapsed,
+            "selected_beams": sorted(selected_indices),
+            "modified_count": len(modified),
+            "modified_beams": [
+                {
+                    "index": index,
+                    "angle_deg": angle,
+                    "original_distance": serialize_distance(original),
+                    "faulty_distance": serialize_distance(faulty),
+                }
+                for index, angle, original, faulty in modified
+            ],
+        })
+
+        save_fault_feedback(self.feedback_file, self.feedback)
+
+        self.get_logger().info(
+            f"LiDAR attack triggered: "
+            f"robot={self.robot_name}, "
+            f"type={self.attack_type}, "
+            f"elapsed={elapsed:.3f}s, "
+            f"selected_beams={sorted(selected_indices)}, "
+            f"modified_count={len(modified)}, "
+            f"modified_beams={modified}"
+        )
+
+def handle_sigterm(signum, frame):
+    raise KeyboardInterrupt
 
 def main():
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -460,6 +643,7 @@ def main():
 
     # Shared parameter
     parser.add_argument("--start-time", type=float, default=0.0)
+    parser.add_argument("--feedback-file", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -476,6 +660,7 @@ def main():
             duration=args.duration,
             seed=args.seed,
             imu_target=args.imu_target,
+            feedback_file=args.feedback_file,
         )
     else:
         node = LiDARFaultInjector(
@@ -486,15 +671,31 @@ def main():
             angular_width=args.angular_width,
             ghost_distance=args.ghost_distance,
             start_time=args.start_time,
+            feedback_file=args.feedback_file,
         )
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (
+        KeyboardInterrupt,
+        ExternalShutdownException,
+        _rclpy.RCLError,
+    ):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if isinstance(node, IMUFaultInjector):
+            node.feedback["feedback_complete"] = True
+            node.flush_feedback()
+        elif isinstance(node, LiDARFaultInjector):
+            node.feedback["feedback_complete"] = True
+            save_fault_feedback(
+                node.feedback_file,
+                node.feedback,
+            )
+
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
